@@ -1,0 +1,199 @@
+### Load important libraries 
+from pyspark import SparkConf, SparkContext
+from pyspark.sql import SQLContext
+sqlContext = SQLContext(sc)
+from pyspark.sql.types import *
+from pyspark.sql.functions import *
+
+##***** Create a schema
+schema = StructType([
+	StructField("ROW_ID",IntegerType(),True),
+	StructField("CASE_STATUS",StringType(),True),
+	StructField("EMPLOYER_NAME",StringType(),True),
+	StructField("SOC_NAME",StringType(),True),
+	StructField("JOB_TITLE",StringType(),True),
+	StructField("FULL_TIME_POSITION",StringType(),True),
+	StructField("PREVALING_WAGE",DoubleType(),True),
+	StructField("YEAR",IntegerType(),True),
+	StructField("WORKSITE",StringType(),True),
+	StructField("LON",DoubleType(),True),
+	StructField("LAT",DoubleType(),True)])
+
+##***** 1) Create a dataframe using above dataframe
+phd_data = sqlContext.read.format("com.databricks.spark.csv").options(delimiter = ",", header = True, inferSchema = True, nullValue = 'NA')
+.option("escape",'"').load('file:///home/1472B32/phd_dataset.csv', schema = schema)
+
+	
+##*****2. Verify summary of the dataframe (how many rows and columns).  
+phd_data.count()
+len(phd_data.columns)
+
+##*****3. Derive the summary statistics.  
+phd_data.describe().show()
+
+##*****4. Find the count of distinct values in each column.  
+phd_data.distinct().count()
+
+##*****5. List EMPLOYER_NAME and YEAR in the descending order of the Approved  applications count (Approved applications are obtained #using CASE_STATUS = 'CERTIFIED').  
+phd_data.registerTempTable("phd_tb")
+sqlContext.sql('select EMPLOYER_NAME , YEAR as year from phd_tb where CASE_STATUS = "CERTIFIED"order by year desc').show()
+
+### *** 6. Observe the above results and list the EMPLOYER_NAME that had the  maximum approved applications for each year for 2012, 2013, ##2014, 2015 and  2016?  
+
+sqlContext.sql('select EMPLOYER_NAME , YEAR as year from phd_tb where (CASE_STATUS = "CERTIFIED") and (year in(2012,2013,2014,2015,2016)) order by year desc').show()
+
+### *** 7. List the approved applications count in the descending order for the  JOB_TITLE = "DATA SCIENTIST" and for each employer and year.  
+sqlContext.sql('select EMPLOYER_NAME , YEAR as year , JOB_TITLE from phd_tb where (CASE_STATUS = "CERTIFIED") and (JOB_TITLE = "DATA SCIENTIST") order by year desc').show()
+
+### *** 8. Find the null values count in each column
+phd_data.select([count(when(col(c).isNull(),c)).alias(c) for c in phd_data.columns]).show()
+
+### *** 9. Remove all the rows with null values (in any column/position).
+df = phd_data.na.drop()
+
+### *** 10. Verify NA in each column
+df.select([count(when(col(c).isNull(),c)).alias(c) for c in df.columns]).show()
+
+### *** 11. List the count of applications in each status (CASE_STATUS) in the descending  order of the year.
+### *** 12.
+### *** 13.
+### *** 14.
+
+### ***  first convert "INVALIDATED and "REJECTED" category to "DENIED" Category because it has only 1 Frequency.
+df = df.withColumn("CASE_STATUS", when(df["CASE_STATUS"] == "INVALIDATED","DENIED").otherwise(df["CASE_STATUS"]))
+df = df.withColumn("CASE_STATUS", when(df["CASE_STATUS"] == "REJECTED","DENIED").otherwise(df["CASE_STATUS"]))
+
+### *** 15 . Identify the different levels/labels/classes/categories in CASE_STATUS field  and generate indexes, for each class/label/category starting ##from 0 in a new  column named ‘label’
+
+def catToValue(Cat):
+    if cat == 'CERTIFIED':
+        return int(0)
+    elif cat == 'CERTIFIED-WITHDRAWN':
+        return int(1)
+    elif cat == 'PENDING QUALITY A...':
+        return int(2)
+    elif cat == 'WITHDRAWN':
+        return int(3)
+    elif cat == 'DENIED':
+        return int(4)
+
+udfcatToValue = udf(catToValue, IntegerType()) 
+df = df.withColumn("label", udfcatToValue("CASE_STATUS")) df.show() 
+
+### *** 16. Dummy categorical variables (using String Indexer and One Hot Encoder).  
+### ***  Find Categorical column from the database
+cat_list = [item[0] for item in df.dtypes if item[1].startswith('string')]
+##cat_list = ['EMPLOYER_NAME', 'SOC_NAME', 'JOB_TITLE', 'FULL_TIME_POSITION', 'WORKSITE'] ## ANSWER
+
+### *** 17. Create a new column ‘features’ (feature vector for all the columns used for the  model building) by combining the vectors created for the ##categorical variables  and numerical features.  
+
+### ***  Import OneHotEncoder, StringIndexer, VectorAssembler,  VectorIndexer
+from pyspark.ml.feature import OneHotEncoder, StringIndexer, VectorAssembler,  VectorIndexer
+
+##****  STRING INDEXER
+emp_indexer = StringIndexer( inputCol="EMPLOYER_NAME",outputCol="emp_idx")
+soc_indexer = StringIndexer( inputCol="SOC_NAME",outputCol="soc_idx")
+job_indexer = StringIndexer( inputCol="JOB_TITLE",outputCol="job_idx")
+fulltime_indexer = StringIndexer( inputCol="FULL_TIME_POSITION",outputCol="fulltime_idx")
+worksite_indexer = StringIndexer( inputCol="WORKSITE",outputCol="worksite_idx")
+
+## **** One Hot Encoder
+emp_encoder = OneHotEncoder(inputCol="emp_idx",outputCol= "emp_vec")
+soc_encoder = OneHotEncoder(inputCol="soc_idx",outputCol= "soc_vec")
+job_encoder = OneHotEncoder(inputCol="job_idx",outputCol= "job_vec")
+fulltime_encoder = OneHotEncoder(inputCol="fulltime_idx",outputCol= "fulltime_vec")
+worksite_encoder = OneHotEncoder(inputCol="worksite_idx",outputCol= "worksite_vec")
+
+## **** Assembler
+assembler = VectorAssembler(inputCols =["emp_vec","soc_vec","job_vec","fulltime_vec","worksite_vec","PREVALING_WAGE","YEAR","LOT","LAN"], outputCol="features")
+
+## *** Create encoder and assembler for target variable
+
+labelIndexer = StringIndexer(inputCol="CASE_STATUS", outputCol="indexedLabel").fit(df)
+from pyspark.ml.feature import IndexToString
+labelConverter = IndexToString(inputCol="prediction",outputCol="predictedLabel",labels=labelIndexer.labels)
+
+##** 18. Perform train and test splits. 
+train,test=df.randomSplit([0.7, 0.3])
+
+## **** Building Logistic Model
+
+from pyspark.ml.classification import LogisticRegression
+from pyspark.ml import Pipeline
+
+lr = LogisticRegression(maxIter=30,labelCol="indexedLabel", featuresCol="features")
+
+stages = [emp_indexer,soc_indexer,job_indexer,fulltime_indexer,worksite_indexer ,emp_encoder,soc_encoder,job_encoder,fulltime_encoder,worksite_encoder,labelIndexer,assembler]
+
+stages.append(lr)
+stages.append(labelConverter)
+
+pipeline = Pipeline(stages=stages)
+
+model = pipeline.fit(train)
+predictions = model.transform(train)
+
+predictions.select("indexedLabel","predictedLabel", "prediction").show(5,False)
+
+
+## *** Find the accuracy on train data
+true_positive = predictions[(predictions.indexedLabel == 1) & (predictions.prediction == 1.0)].count()
+true_negative = predictions[(predictions.indexedLabel == 0) & (predictions.prediction == 0.0)].count()
+false_positive = predictions[(predictions.indexedLabel == 0) & (predictions.prediction == 1.0)].count()
+false_negative = predictions[(predictions.indexedLabel == 1) & (predictions.prediction == 0.0)].count()
+print "True Positives:", true_positive
+print "True Negatives:", true_negative
+print "False Positives:", false_positive
+print "False Negatives:", false_negative
+print "Total", predictions.count()
+
+### *** Predict on test data
+pred_test=model.transform(test)
+true_positive = pred_test[(pred_test.indexedLabel == 1) & (pred_test.prediction == 1.0)].count()
+true_negative = pred_test[(pred_test.indexedLabel == 0) & (pred_test.prediction == 0.0)].count()
+false_positive = pred_test[(pred_test.indexedLabel == 0) & (pred_test.prediction == 1.0)].count()
+false_negative = pred_test[(pred_test.indexedLabel == 1) & (pred_test.prediction == 0.0)].count()
+print "True Positives:", true_positive
+print "True Negatives:", true_negative
+print "False Positives:", false_positive
+print "False Negatives:", false_negative
+print "Total", pred_test.count()
+
+### ***** RANDOM FOREST
+
+from pyspark.ml.classification import RandomForestClassifier
+rf = RandomForestClassifier(labelCol="indexedLabel", featuresCol="features",numTrees=100,maxDepth=12,maxBins=8)
+
+stages1 = [emp_indexer,soc_indexer,job_indexer,fulltime_indexer,worksite_indexer ,emp_encoder,soc_encoder,job_encoder,fulltime_encoder,worksite_encoder,labelIndexer,assembler]
+
+stages1.append(rf)
+stages1.append(labelConverter)
+
+pipeline = Pipeline(stages=stages1)
+
+### *** Building random forest
+model = pipeline.fit(train)
+predictions = model.transform(train)
+
+## *** Predict on train data
+true_positive = predictions[(predictions.indexedLabel == 1) & (predictions.prediction == 1.0)].count()
+true_negative = predictions[(predictions.indexedLabel == 0) & (predictions.prediction == 0.0)].count()
+false_positive = predictions[(predictions.indexedLabel == 0) & (predictions.prediction == 1.0)].count()
+false_negative = predictions[(predictions.indexedLabel == 1) & (predictions.prediction == 0.0)].count()
+print "True Positives:", true_positive
+print "True Negatives:", true_negative
+print "False Positives:", false_positive
+print "False Negatives:", false_negative
+print "Total", predictions.count()
+
+### ** Predict on test data
+pred_test=model.transform(test)
+true_positive = pred_test[(pred_test.indexedLabel == 1) & (pred_test.prediction == 1.0)].count()
+true_negative = pred_test[(pred_test.indexedLabel == 0) & (pred_test.prediction == 0.0)].count()
+false_positive = pred_test[(pred_test.indexedLabel == 0) & (pred_test.prediction == 1.0)].count()
+false_negative = pred_test[(pred_test.indexedLabel == 1) & (pred_test.prediction == 0.0)].count()
+print "True Positives:", true_positive
+print "True Negatives:", true_negative
+print "False Positives:", false_positive
+print "False Negatives:", false_negative
+print "Total", pred_test.count()
